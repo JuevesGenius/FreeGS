@@ -330,7 +330,7 @@ class Encoder_sigma(nn.Module):
 
 class Encoder_Tri_MLP_f(nn.Module):
     def __init__(self, D=3, W=256, input_ch=3, input_ch_color=3, input_ch_message=4, input_ch_views=3, output_ch=4,
-                 skips=[-1], use_viewdirs=False, D_m=2, W_m=128):
+                 skips=[-1], use_viewdirs=True, D_m=2, W_m=128):
         """
         """
         super(Encoder_Tri_MLP_f, self).__init__()
@@ -369,8 +369,10 @@ class Encoder_Tri_MLP_f(nn.Module):
         else:
             self.output_linear = nn.Linear(W, output_ch)
 
-    def forward(self, x, rgbsigma, message):
-        input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
+    def forward(self, x, dir, rgbsigma, message):
+        #input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
+        input_pts = x
+        input_views = dir
         message = message.expand(input_pts.shape[0], -1)
         h = torch.cat([input_pts, rgbsigma], -1)
         for i, l in enumerate(self.feature_color):
@@ -396,7 +398,8 @@ class Encoder_Tri_MLP_f(nn.Module):
                 h = F.relu(h)
 
             rgb = self.rgb_linear(h)
-            outputs = torch.cat([rgb, rgbsigma], -1)
+            # outputs = torch.cat([rgb, rgbsigma], -1)
+            outputs = rgb
         else:
             outputs = self.output_linear(h)
 

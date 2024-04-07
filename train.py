@@ -22,11 +22,30 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from encoder import Encoder, Encoder_MLP, Encoder_Tri_MLP_add, Encoder_Tri_MLP_f
+from decoder import Decoder_sigmoid
+import torch.nn.functional as F
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def create_encoder():
+    encoder_net = Encoder_Tri_MLP_f(D=3, W=256, input_ch=3, input_ch_color=3, input_ch_message=4,
+                                  input_ch_views=3, output_ch=3,
+                                  skips=[-1], use_viewdirs=True).to(device)
+    optimizer_encoder = torch.optim.Adam(params=encoder_net.parameters(), lr=5e-4, betas=(0.9, 0.999))
+    # need load part
+    return encoder_net, optimizer_encoder
+
+def create_decoder():
+    decoder_net = Decoder_sigmoid(decoder_channels=64, decoder_blocks=6, message_length=4).to(device)
+    optimizer_decoder = torch.optim.Adam(params=decoder_net.parameters(), lr=1e-3, betas=(0.9, 0.999))
+
+    return decoder_net, optimizer_decoder
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
@@ -34,6 +53,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
+    encoder, encoder_optim = create_encoder()
+    decoder, decoder_optim = create_decoder()
+
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -83,13 +105,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
-        render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
+        message = torch.randint(0, 2, (1, 4)).float().to(device)
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, encoder=encoder, message=message)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+
+        # Decode
+        image_with_batch = image.unsqueeze(0)
+        decode_message = decoder(image_with_batch)
+        message_loss = F.binary_cross_entropy(decode_message, message)
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        img_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        w_message = 5.0
+        w_img = 1.0
+        loss = w_message * message_loss + w_img * img_loss
         loss.backward()
 
         iter_end.record()
@@ -104,7 +135,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), encoder=encoder, message=message)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -126,6 +157,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
+
+                encoder_optim.step()
+                decoder_optim.step()
+                encoder_optim.zero_grad()
+                decoder_optim.zero_grad()
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -153,7 +189,7 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, encoder, message):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -170,7 +206,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 l1_test = 0.0
                 psnr_test = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
-                    image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
+                    image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs, encoder=encoder, message=message)["render"], 0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     if tb_writer and (idx < 5):
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
