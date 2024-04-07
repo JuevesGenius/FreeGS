@@ -49,7 +49,7 @@ def create_decoder():
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
-    tb_writer = prepare_output_and_logger(dataset)
+    tb_writer, model_path = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -70,6 +70,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+
+    # fixed message
+    # message = torch.tensor([[1, 0, 0, 1]], dtype=torch.float, device=device)
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -118,8 +121,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         img_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-        w_message = 5.0
-        w_img = 1.0
+        w_message = 0.5
+        w_img = 0.5
         loss = w_message * message_loss + w_img * img_loss
         loss.backward()
 
@@ -139,6 +142,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+
+            # save model weight of encoder and decoder
+            if iteration == opt.iterations:
+                path = os.path.join(model_path, 'ckpt.tar')
+                torch.save({
+                    # 'global_step': global_step,
+                    'decoder_optim_state_dict': decoder_optim.state_dict(),
+                    'decoder_state_dict': decoder.state_dict(),
+                    'encoder_optim_state_dict': encoder_optim.state_dict(),
+                    'encoder_state_dict': encoder.state_dict(),
+                }, path)
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -187,7 +201,7 @@ def prepare_output_and_logger(args):
         tb_writer = SummaryWriter(args.model_path)
     else:
         print("Tensorboard not available: not logging progress")
-    return tb_writer
+    return tb_writer, args.model_path
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, encoder, message):
     if tb_writer:
