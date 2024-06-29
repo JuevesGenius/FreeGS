@@ -26,7 +26,7 @@ from decoder import Decoder_sigmoid
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def create_encoder():
-    encoder_net = Encoder_Tri_MLP_f(D=3, W=256, input_ch=3, input_ch_color=3, input_ch_message=4,
+    encoder_net = Encoder_Tri_MLP_f(D=3, W=256, input_ch=3, input_ch_color=3, input_ch_message=16,
                                   input_ch_views=3, output_ch=3,
                                   skips=[-1], use_viewdirs=True).to(device)
     #optimizer_encoder = torch.optim.Adam(params=encoder_net.parameters(), lr=5e-4, betas=(0.9, 0.999))
@@ -34,7 +34,7 @@ def create_encoder():
     return encoder_net
 
 def create_decoder():
-    decoder_net = Decoder_sigmoid(decoder_channels=64, decoder_blocks=6, message_length=4).to(device)
+    decoder_net = Decoder_sigmoid(decoder_channels=64, decoder_blocks=6, message_length=16).to(device)
     #optimizer_decoder = torch.optim.Adam(params=decoder_net.parameters(), lr=1e-3, betas=(0.9, 0.999))
 
     return decoder_net
@@ -48,7 +48,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         # rendering = render_without_encode(view, gaussians, pipeline, background)["render"]
-        message = torch.tensor([[1, 0, 0, 1]], dtype=torch.float, device=device)
+        message = torch.tensor([[1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1]], dtype=torch.float, device=device)
         rendering = render(view, gaussians, pipeline, background, encoder=encoder, message=message)["render"]
         gt = view.original_image[0:3, :, :]
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))

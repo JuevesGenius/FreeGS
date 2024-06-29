@@ -8,7 +8,7 @@ from decoder import Decoder_sigmoid
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # 创建Decoder模型实例
-decoder = Decoder_sigmoid(decoder_channels=64, decoder_blocks=6, message_length=4).to(device)
+decoder = Decoder_sigmoid(decoder_channels=64, decoder_blocks=6, message_length=16).to(device)
 
 # 设置设备为CPU或GPU
 
@@ -21,7 +21,7 @@ transform = transforms.Compose([
 
 # 获取命令行传入的参数（文件夹路径）
 input_folder = sys.argv[1]  # 第一个参数是文件夹路径
-message = sys.argv[2]
+message = torch.tensor([[1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1]], dtype=torch.int, device=device)
 # output_folder = 'path_to_your_output_folder'  # 设置输出文件夹路径
 
 ckpt = torch.load(os.path.join(input_folder,'ckpt.tar'))
@@ -33,7 +33,7 @@ decoder.load_state_dict(ckpt['decoder_state_dict'])
 total_cnt = 0
 match_cnt = 0
 
-input_path = os.path.join(input_folder, 'train/ours_30000/renders')
+input_path = os.path.join(input_folder, 'test/ours_7000/renders')
 # 遍历输入文件夹中的所有PNG文件
 for filename in os.listdir(input_path):
     if filename.endswith('.png'):
@@ -43,12 +43,17 @@ for filename in os.listdir(input_path):
         image = transform(image).unsqueeze(0).to(device)  # 添加批次维度并移动到指定设备
 
         total_cnt += 1
-        # 使用Decoder模型处理图像
         with torch.no_grad():
             output = decoder(image)
-            print(output)
-            if output == message:
+            if torch.equal(output.round(),message):
                 match_cnt += 1
+        # 使用Decoder模型处理图像
+        # if total_cnt%10 == 0:
+        #     with torch.no_grad():
+        #         output = decoder(image)
+        #         print(output.round())
+            #if output == message:
+                #match_cnt += 1
         # 保存处理后的张量到输出文件夹
         # output_filename = os.path.splitext(filename)[0] + '_output.pt'
         # output_path = os.path.join(output_folder, output_filename)

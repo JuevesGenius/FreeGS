@@ -24,6 +24,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from encoder import Encoder, Encoder_MLP, Encoder_Tri_MLP_add, Encoder_Tri_MLP_f
 from decoder import Decoder_sigmoid
+import logging
 import torch.nn.functional as F
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -34,7 +35,7 @@ except ImportError:
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def create_encoder():
-    encoder_net = Encoder_Tri_MLP_f(D=3, W=256, input_ch=3, input_ch_color=3, input_ch_message=4,
+    encoder_net = Encoder_Tri_MLP_f(D=3, W=256, input_ch=3, input_ch_color=3, input_ch_message=16,
                                   input_ch_views=3, output_ch=3,
                                   skips=[-1], use_viewdirs=True).to(device)
     optimizer_encoder = torch.optim.Adam(params=encoder_net.parameters(), lr=5e-4, betas=(0.9, 0.999))
@@ -42,7 +43,7 @@ def create_encoder():
     return encoder_net, optimizer_encoder
 
 def create_decoder():
-    decoder_net = Decoder_sigmoid(decoder_channels=64, decoder_blocks=6, message_length=4).to(device)
+    decoder_net = Decoder_sigmoid(decoder_channels=64, decoder_blocks=6, message_length=16).to(device)
     optimizer_decoder = torch.optim.Adam(params=decoder_net.parameters(), lr=1e-3, betas=(0.9, 0.999))
 
     return decoder_net, optimizer_decoder
@@ -50,6 +51,8 @@ def create_decoder():
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
     tb_writer, model_path = prepare_output_and_logger(dataset)
+    log_file = model_path + 'memory_usage.log'
+    logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s - %(message)s')
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -72,7 +75,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter += 1
 
     # fixed message
-    # message = torch.tensor([[1, 0, 0, 1]], dtype=torch.float, device=device)
+    message = torch.tensor([[1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1]], dtype=torch.float, device=device)
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -108,7 +111,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
-        message = torch.randint(0, 2, (1, 4)).float().to(device)
+        #message = torch.randint(0, 2, (1, 4)).float().to(device)
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, encoder=encoder, message=message)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
@@ -116,13 +119,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         image_with_batch = image.unsqueeze(0)
         decode_message = decoder(image_with_batch)
         message_loss = F.binary_cross_entropy(decode_message, message)
+        # message_loss = 0
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         img_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-        w_message = 0.5
-        w_img = 0.5
+        w_message = 1
+        w_img = 4
         loss = w_message * message_loss + w_img * img_loss
         loss.backward()
 
@@ -138,6 +142,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
+            if iteration % 100 == 0:
+                # 获取当前CUDA设备上的内存占用
+                memory_usage = torch.cuda.memory_allocated() / (1024 * 1024)
+                # 将内存占用信息写入日志文件
+                logging.info(f'Iteration {iteration}: Memory usage: {memory_usage} MBs')
+            # training_report_simple(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations)
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), encoder=encoder, message=message)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
@@ -170,16 +180,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
-                gaussians.optimizer.zero_grad(set_to_none = True)
-
                 encoder_optim.step()
                 decoder_optim.step()
-                encoder_optim.zero_grad()
-                decoder_optim.zero_grad()
+                gaussians.optimizer.zero_grad(set_to_none = True)
+                encoder_optim.zero_grad(set_to_none = True)
+                decoder_optim.zero_grad(set_to_none = True)
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+    logging.shutdown()
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -202,6 +212,16 @@ def prepare_output_and_logger(args):
     else:
         print("Tensorboard not available: not logging progress")
     return tb_writer, args.model_path
+
+def training_report_simple(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations):
+    if tb_writer:
+        tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
+        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
+        tb_writer.add_scalar('iter_time', elapsed, iteration)
+    
+    # torch.cuda.empty_cache()
+
+    
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, encoder, message):
     if tb_writer:
