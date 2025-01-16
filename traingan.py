@@ -27,6 +27,8 @@ from encoder import Encoder, Encoder_MLP, Encoder_Tri_MLP_add, Encoder_Tri_MLP_f
 from decoder import Decoder_sigmoid, VGG16UNet, MVGG16UNet, MClassifier, Classifier
 import logging
 import torch.nn.functional as F
+import numpy as np
+from PIL import Image
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -73,15 +75,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     log_file = model_path + 'memory_usage.log'
     logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s - %(message)s')
     gaussians = GaussianModel(dataset.sh_degree)
-    scene = Scene(dataset, gaussians)
+    scene = Scene(dataset, gaussians, shuffle=False)
     gaussians.training_setup(opt)
     
-    decoder, optimizer_decoder = create_decoder(wm_resize)
-    classifier, optimizer_classifier = create_classifier()
 
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+
+    decoder, optimizer_decoder = create_decoder(wm_resize)
+    classifier, optimizer_classifier = create_classifier()
+    decoder.train()
+    classifier.train()
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -94,12 +99,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
 
-    # fixed message
+    # watermark message
     # message = torch.tensor([[1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1]], dtype=torch.float, device=device)
-    message = []
+    image = Image.open("watermark.png")
+    image = image.resize((128, 128))
+    image_array = np.array(image).transpose(2, 0, 1)
+    message = torch.tensor(image_array, dtype=torch.float32).unsqueeze(0).to(device)
+
+    # empty image
+    image = Image.new('RGB', (128, 128), color='white')
+    image_array = np.array(image)
+    empty_message = torch.tensor(image_array).permute(2, 0, 1).unsqueeze(0).to(device)
+
 
     # Pick a fixed trajectory
-    trajectory_length = 10
+    trajectory_length = 13
     if not viewpoint_stack or len(viewpoint_stack) < trajectory_length:
         viewpoint_stack = scene.getTrainCameras().copy()
         
@@ -152,15 +166,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # render fixed&random tajectories
         random_img_sets = []
         fixed_img_sets = []
+        # random_img_mse = []
+        # fixed_img_mse = []
+        loss_render = 0
         for vp in random_viewtrajectory:
             render_pkg = render_without_encode(vp, gaussians, pipe, bg)
             image = render_pkg["render"]
-            visibility_filter = render_pkg["visibility_filter"]
+            # gt_image = vp.original_image.cuda()
+            # random_img_mse.append(l1_loss(image, gt_image))
+            # visibility_filter = render_pkg["visibility_filter"]
             random_img_sets.append(image)
         for vp in fixed_viewtrajectory:
             render_pkg = render_without_encode(vp, gaussians, pipe, bg)
             image = render_pkg["render"]
             fixed_img_sets.append(image)
+            gt_image = vp.original_image.cuda()
+            # fixed_img_mse.append(l1_loss(image, gt_image))
+            loss_render += l1_loss(image, gt_image)
 
         random_img_sets_tensor = prepare_image_sets(random_img_sets)
         fixed_img_sets_tensor = prepare_image_sets(fixed_img_sets)
@@ -180,7 +202,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         res_fixed = decoder (fixed_img_sets_tensor, out_class_fixed, return_c=False,cmask=False)
         res_random = decoder (random_img_sets_tensor, out_class_random, return_c=False,cmask=False)
-
+        
         # Loss
         # gt_image = viewpoint_cam.original_image.cuda()
         # Ll1 = l1_loss(image, gt_image)
@@ -188,8 +210,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # w_message = 1
         # w_img = 4
         # loss = w_message * message_loss + w_img * img_loss
-        loss = l1_loss(res_fixed, res_random)
-        Ll1 = loss
+        loss_watermark = l1_loss(res_fixed, message)
+        loss_empty = l1_loss(res_random, empty_message)
+        loss_class = F.binary_cross_entropy(torch.stack([out_class_fixed, out_class_random]).squeeze(-1), torch.stack( [torch.ones(trajectory_length), torch.zeros(trajectory_length)]).to(device) )
+        # loss_render = sum(fixed_img_mse)/len(fixed_img_mse) + sum(random_img_mse)/len(random_img_mse)
+        Ll1 = loss_render
+        loss = 2 * loss_watermark + 0.05 * loss_empty + 2.5 * loss_class + 11 * loss_render
+        # print("Loss from watermark:", loss_watermark)
+        # print("Loss from empty:", loss_empty)
+        # print("Loss from class:", loss_class)
+        # print("Loss from rende:", loss_render)
+        # print("Total loss:", loss)
+        # sys.exit
         loss.backward()
 
         iter_end.record()
@@ -204,26 +236,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            if iteration % 100 == 0:
+            # if iteration % 100 == 0:
                 # 获取当前CUDA设备上的内存占用
-                memory_usage = torch.cuda.memory_allocated() / (1024 * 1024)
+                # memory_usage = torch.cuda.memory_allocated() / (1024 * 1024)
                 # 将内存占用信息写入日志文件
-                logging.info(f'Iteration {iteration}: Memory usage: {memory_usage} MBs')
+                # logging.info(f'Iteration {iteration}: Memory usage: {memory_usage} MBs')
+                
             training_report_simple(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations)
             # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), encoder=encoder, message=message)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
-            # save model weight of encoder and decoder
+            # save model weight of classifier and decoder
             if iteration == opt.iterations:
                 path = os.path.join(model_path, 'ckpt.tar')
                 torch.save({
                     # 'global_step': global_step,
-                    'decoder_optim_state_dict': decoder_optim.state_dict(),
+                    'optimizer_decoder_state_dict': optimizer_decoder.state_dict(),
                     'decoder_state_dict': decoder.state_dict(),
-                    'encoder_optim_state_dict': encoder_optim.state_dict(),
-                    'encoder_state_dict': encoder.state_dict(),
+                    'optimizer_classifier_state_dict': optimizer_classifier.state_dict(),
+                    'classifier_state_dict': classifier.state_dict(),
                 }, path)
 
             # Densification
@@ -242,10 +275,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
-                
+                optimizer_decoder.step()
+                optimizer_classifier.step()
+
                 gaussians.optimizer.zero_grad(set_to_none = True)
-                
-                decoder_optim.zero_grad(set_to_none = True)
+                optimizer_classifier.zero_grad(set_to_none = True)
+                optimizer_decoder.zero_grad(set_to_none = True)
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))

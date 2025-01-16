@@ -291,7 +291,7 @@ class VGG16UNet(nn.Module):
         # pool(conv4) 1,512,3,3
 
         # x_c = self.c_pool(conv4) #1,512,3,3
-        # x_c = F.sigmoid(self.classifer_fc(x_c.view(x_c.shape[0],-1)))
+        # x_c = nn.sigmoid(self.classifer_fc(x_c.view(x_c.shape[0],-1)))
 
         # dec5 = self.dec5(torch.cat([center, conv5], 1))
         dec4 = self.dec4(torch.cat([center, conv4], 1)) # torch.Size([2, 256, 188, 252])
@@ -307,7 +307,7 @@ class VGG16UNet(nn.Module):
 
         x_out=self.final(dec1)
         
-        # x_out=F.sigmoid(self.final(dec1))
+        # x_out=nn.sigmoid(self.final(dec1))
 
         # if cmask:
         #     x_out = x_out*x_c.unsqueeze(-1).unsqueeze(-1)
@@ -477,7 +477,7 @@ class Classifier(nn.Module):
         # pool(conv4) 1,512,3,3
 
         x_c = self.c_pool(conv4) #1,512,3,3
-        x_c = F.sigmoid(self.classifer_fc(x_c.view(x_c.shape[0],-1)))
+        x_c = torch.sigmoid(self.classifer_fc(x_c.view(x_c.shape[0],-1)))
 
         # dec5 = self.dec5(torch.cat([center, conv5], 1))
         # dec4 = self.dec4(torch.cat([center, conv4], 1)) # torch.Size([2, 256, 188, 252])
@@ -493,7 +493,7 @@ class Classifier(nn.Module):
 
         # x_out=self.final(dec1)
         
-        # x_out=F.sigmoid(self.final(dec1))
+        # x_out=nn.sigmoid(self.final(dec1))
 
         # if cmask:
         #     x_out = x_out*x_c.unsqueeze(-1).unsqueeze(-1)
